@@ -2,7 +2,9 @@
 
 //  ---------------------------------------------------------------------------
 
+const CryptoJS = require ('crypto-js')
 const Exchange = require('./base/Exchange');
+const moment = require('moment');
 const { ArgumentsRequired, AuthenticationError, ExchangeError, ExchangeNotAvailable, InvalidOrder, OrderNotFound, InsufficientFunds, NotSupported } = require('./base/errors');
 
 //  ---------------------------------------------------------------------------
@@ -108,7 +110,7 @@ module.exports = class huobipro extends Exchange {
                         'order/orders', // 创建一个新的订单请求 （仅创建订单，不执行下单）
                         'order/orders/{id}/place', // 执行一个订单 （仅执行已创建的订单）
                         'order/orders/{id}/submitcancel', // 申请撤销一个订单请求
-                        'order/orders/batchCancelOpenOrders', // 批量撤销订单
+                        'order/orders/batchcancel', // 批量撤销订单
                         'dw/balance/transfer', // 资产划转
                         'dw/withdraw/api/create', // 申请提现虚拟币
                         'dw/withdraw-virtual/create', // 申请提现虚拟币
@@ -157,6 +159,11 @@ module.exports = class huobipro extends Exchange {
                         'type': 'ws',
                         'baseurl': 'wss://api.huobi.pro/ws',
                     },
+                    'secure': {
+                        'type': 'ws',
+                        'baseurl': 'wss://api.huobi.pro/ws/v1',
+                        'private': true
+                    }
                 },
                 'events': {
                     'ob': {
@@ -168,6 +175,20 @@ module.exports = class huobipro extends Exchange {
                     },
                     'trade': {
                         'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                        },
+                    },
+                    'detail': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                        },
+                    },
+                    'orders': {
+                        'conx-tpl': 'secure',
                         'conx-param': {
                             'url': '{baseurl}',
                             'id': '{id}',
@@ -1188,6 +1209,52 @@ module.exports = class huobipro extends Exchange {
         return this.safeString(statuses, status, status);
     }
 
+    _websocketOnOpen(contextId, websocketConexConfig) {
+        if (contextId === 'secure') {
+            var authRequest = this.auth();
+            this.websocketSendJson(authRequest,contextId);
+        }
+    }
+
+    sign_sha(method, host, path, data) {
+        var pars = [];
+
+        for (let item in data) {
+            pars.push(item + "=" + encodeURIComponent(data[item]));
+        }
+
+        var p = pars.sort().join("&");
+
+        var meta = [method, host, path, p].join('\n');
+
+        var hash = CryptoJS.HmacSHA256(meta, this.secret);
+        var Signature = CryptoJS.enc.Base64.stringify(hash);
+        return Signature;
+    }
+
+    host = "api.huobi.pro";
+    uri = "/ws/v1";
+
+    auth() {
+        // const timestamp = moment.utc().format('YYYY-MM-DDTHH:mm:ss');
+        const timestamp = moment.utc().format('YYYY-MM-DDTHH:mm:ss');
+
+        //let datestring = new Date().toISOString();
+        //const timestamp = datestring.substring(0, datestring.length - 5);
+
+        var data = {
+            AccessKeyId: this.apiKey,
+            SignatureMethod: "HmacSHA256",
+            SignatureVersion: "2",
+            Timestamp: timestamp,
+        }
+
+        //计算签名
+        data["Signature"] = this.sign_sha('GET', this.host, this.uri, data);
+        data["op"] = "auth";
+        return data;
+    }
+
     _websocketOnMessage(contextId, data) {
         // TODO: pako function in Exchange.js/.py/.php
         // console.log(data);
@@ -1226,7 +1293,27 @@ module.exports = class huobipro extends Exchange {
         };
     }
 
+    _websocketParseDetail(detail, symbol) {
+        // {'amount': 0.01, 'ts': 1551963266001, 'id': 10049953357926186872465, 'price': 3877.04, 'direction': 'sell'}
+        let timestamp = this.safeInteger(detail, 'ts');
+        return {
+            'id': this.safeString(detail, 'id'),
+            'info': detail,
+            'timestamp': timestamp,
+            'datetime': this.iso8601(timestamp),
+            'symbol': symbol,
+            'open': this.safeFloat(detail, 'open'),
+            'close': this.safeFloat(detail, 'close'),
+            'high': this.safeFloat(detail, 'high'),
+            'low': this.safeFloat(detail, 'low'),
+            'amount': this.safeFloat(detail, 'amount'),
+            'vol': this.safeFloat(detail, 'vol'),
+            'count': this.safeFloat(detail, 'count'),
+        };
+    }
+
     _websocketDispatch(contextId, data) {
+
         // console.log('received', data.ch, 'data.ts', data.ts, 'crawler.ts', moment().format('x'));
         const ch = this.safeString(data, 'ch');
         const vals = ch.split('.');
@@ -1235,6 +1322,7 @@ module.exports = class huobipro extends Exchange {
         // :symbol
         // const symbol = this.marketsById[rawsymbol].symbol;
         const symbol = this.findSymbol(rawsymbol);
+
         // let channel = data.ch.split('.')[2];
         if (channel === 'depth') {
             // :ob emit
@@ -1256,13 +1344,21 @@ module.exports = class huobipro extends Exchange {
                 let trade = this._websocketParseTrade(multiple_trades[i], symbol);
                 this.emit('trade', symbol, trade);
             }
+        } else if (channel === 'detail') {
+            let detail = this._websocketParseDetail(data['tick'], symbol);
+            this.emit('detail', symbol, detail);
+        } else if (channel === "orders") {
+            console.log('orders');
+        } else if (channel === "auth") {
+            
+            this.safeString(data, 'err-code')
         }
         // TODO:kline
         // console.log('kline', data.tick);
     }
 
     _websocketSubscribe(contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade') {
+        if (event !== 'ob' && event !== 'trade' && event !== 'detail' && event !== 'orders') {
             throw new NotSupported('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
         }
         let ch = undefined;
@@ -1278,20 +1374,28 @@ module.exports = class huobipro extends Exchange {
             ch = '.depth.step' + depth.toString();
         } else if (event === 'trade') {
             ch = '.trade.detail';
+        } else if (event === 'detail') {
+            ch = '.detail';
         }
         const rawsymbol = this.marketId(symbol);
         const sendJson = {
             'sub': 'market.' + rawsymbol + ch,
             'id': rawsymbol,
-            "freq-ms": 0,
         };
-        this.websocketSendJson(sendJson);
+
+        if (event === "orders") {
+            sendJson.sub = 'orders.' + rawsymbol + '.update';
+            this.websocketSendJson(sendJson, "secure");
+        } else {
+            this.websocketSendJson(sendJson);
+        }
+
         let nonceStr = nonce.toString();
         this.emit(nonceStr, true);
     }
 
     _websocketUnsubscribe(contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade') {
+        if (event !== 'ob' && event !== 'trade' && event !== 'detail' && event !== 'orders') {
             throw new NotSupported('unsubscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
         }
         let ch = undefined;
@@ -1300,12 +1404,19 @@ module.exports = class huobipro extends Exchange {
             ch = '.depth.step' + depth.toString();
         } else if (event === 'trade') {
             ch = '.trade.detail';
+        } else if (event === 'detail') {
+            ch = '.detail';
         }
         const rawsymbol = this.marketId(symbol);
         const sendJson = {
             'unsub': 'market.' + rawsymbol + ch,
             'id': rawsymbol,
         };
+
+        if (event === "orders") {
+            sendJson.sub = 'orders.' + rawsymbol + '.update';
+        }
+
         this.websocketSendJson(sendJson);
         let nonceStr = nonce.toString();
         this.emit(nonceStr, true);

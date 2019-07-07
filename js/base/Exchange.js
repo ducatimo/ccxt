@@ -2226,6 +2226,7 @@ module.exports = class Exchange extends EventEmitter{
         websocketConnectionInfo['conx'].on ('open', () => {
             websocketConnectionInfo['auth'] = false;
             this._websocketOnOpen(conxid, websocketConnectionInfo['conx'].options);
+            this.emit ('open', conxid);
         });
         websocketConnectionInfo['conx'].on ('err', (err) => {
             websocketConnectionInfo['auth'] = false;
