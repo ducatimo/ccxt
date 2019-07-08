@@ -1,12 +1,12 @@
 "use strict";
 
-const WebsocketBaseConnection = require ('./websocket_base_connection');
+const WebsocketBaseConnection = require('./websocket_base_connection');
 const WebSocket = require('ws');
 
-const { sleep } = require ('../functions')
+const { sleep } = require('../functions')
 
 module.exports = class WebsocketConnection extends WebsocketBaseConnection {
-    constructor (options, timeout) {
+    constructor(options, timeout) {
         super();
         this.options = options;
         this.timeout = timeout;
@@ -17,7 +17,7 @@ module.exports = class WebsocketConnection extends WebsocketBaseConnection {
     }
 
     connect() {
-        return new Promise ((resolve, reject) => {
+        return new Promise((resolve, reject) => {
             if ((this.client.ws != null) && (this.client.ws.readyState === this.client.ws.OPEN)) {
                 resolve();
                 return;
@@ -36,7 +36,7 @@ module.exports = class WebsocketConnection extends WebsocketBaseConnection {
                 if (this.options['wait-after-connect']) {
                     await sleep(this.options['wait-after-connect']);
                 }
-                this.emit ('open');
+                this.emit('open');
                 resolve();
             });
 
@@ -46,17 +46,17 @@ module.exports = class WebsocketConnection extends WebsocketBaseConnection {
                 }
                 reject(error);
             });
-        
+
             client.ws.on('close', () => {
                 if (!client.isClosing) {
                     this.emit('close');
                 }
                 reject('closing');
             });
-        
+
             client.ws.on('message', async (data) => {
-                if (this.options['verbose']){
-                    console.log("WebsocketConnection: "+data);
+                if (this.options['verbose']) {
+                    console.log("WebsocketConnection: " + data);
                 }
 
                 if (!client.isClosing) {
@@ -68,25 +68,30 @@ module.exports = class WebsocketConnection extends WebsocketBaseConnection {
         });
     }
 
-    close () {
+    close() {
+        let closed = false;
         if (this.client.ws != null) {
-            this.client.isClosing = true;
-            this.client.ws.close();
-            this.client.ws = null;
+            if (this.client.ws.readyState !== this.client.ws.CLOSED) {
+                this.client.isClosing = true;
+                this.client.ws.close();
+                this.client.ws = null;
+                closed = true;
+            }
         }
+        return closed;
     }
 
-    send (data) {
+    send(data) {
         if (!this.client.isClosing) {
-            this.client.ws.send (data);
+            this.client.ws.send(data);
         }
     }
 
     isActive() {
-        if (this.client.ws == null){
+        if (this.client.ws == null) {
             return false;
         }
-        return (this.client.ws.readyState == this.client.ws.OPEN) || 
+        return (this.client.ws.readyState == this.client.ws.OPEN) ||
             (this.client.ws.readyState == this.client.ws.CONNECTING);
     }
 };

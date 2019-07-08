@@ -2154,9 +2154,11 @@ module.exports = class Exchange extends EventEmitter{
 
     websocketClose (conxid = 'default') {
         let websocketConxInfo = this._contextGetConnectionInfo(conxid);
-        websocketConxInfo['conx'].close();
+        let closed = websocketConxInfo['conx'].close();
         // ensure invoke close
-        this._websocketOnClose(conxid);
+        if(closed) {
+            this._websocketOnClose(conxid);
+        }
     }
     
     websocketCloseAll () {

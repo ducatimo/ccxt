@@ -2,7 +2,7 @@
 
 //  ---------------------------------------------------------------------------
 
-const CryptoJS = require ('crypto-js')
+const CryptoJS = require('crypto-js')
 const Exchange = require('./base/Exchange');
 const moment = require('moment');
 const { ArgumentsRequired, AuthenticationError, ExchangeError, ExchangeNotAvailable, InvalidOrder, OrderNotFound, InsufficientFunds, NotSupported } = require('./base/errors');
@@ -110,7 +110,7 @@ module.exports = class huobipro extends Exchange {
                         'order/orders', // 创建一个新的订单请求 （仅创建订单，不执行下单）
                         'order/orders/{id}/place', // 执行一个订单 （仅执行已创建的订单）
                         'order/orders/{id}/submitcancel', // 申请撤销一个订单请求
-                        'order/orders/batchcancel', // 批量撤销订单
+                        'order/orders/batchCancelOpenOrders', // 批量撤销订单
                         'dw/balance/transfer', // 资产划转
                         'dw/withdraw/api/create', // 申请提现虚拟币
                         'dw/withdraw-virtual/create', // 申请提现虚拟币
@@ -162,7 +162,8 @@ module.exports = class huobipro extends Exchange {
                     'secure': {
                         'type': 'ws',
                         'baseurl': 'wss://api.huobi.pro/ws/v1',
-                        'private': true
+                        'private': true,
+                        'wait4readyEvent': 'authorized'
                     }
                 },
                 'events': {
@@ -188,6 +189,13 @@ module.exports = class huobipro extends Exchange {
                         },
                     },
                     'orders': {
+                        'conx-tpl': 'secure',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                        },
+                    },
+                    'balance': {
                         'conx-tpl': 'secure',
                         'conx-param': {
                             'url': '{baseurl}',
@@ -885,15 +893,16 @@ module.exports = class huobipro extends Exchange {
     }
 
     async cancelOrders(symbol) {
+        symbol = symbol.toLowerCase();
         await this.loadAccounts();
-        const response = await this.privatePostOrderOrdersBatchCancelOpenOrders({ 'account-id':  this.accounts[0]['id'], 'symbol': symbol });
+        const response = await this.privatePostOrderOrdersBatchCancelOpenOrders({ 'account-id': this.accounts[0]['id'], 'symbol': symbol });
         //
         //     let response = {
         //         'status': 'ok',
         //         'data': '10138899000',
         //     };
         //
-       return response;
+        return response;
     }
 
     async cancelOrder(id, symbol = undefined, params = {}) {
@@ -1212,9 +1221,15 @@ module.exports = class huobipro extends Exchange {
     _websocketOnOpen(contextId, websocketConexConfig) {
         if (contextId === 'secure') {
             var authRequest = this.auth();
-            this.websocketSendJson(authRequest,contextId);
+            this.websocketSendJson(authRequest, contextId);
         }
     }
+
+    _websocketOnClose(contextId) {
+        console.log(contextId + ': reconnect..');
+        this.websocketRecoverConxid(contextId);
+    }
+
 
     sign_sha(method, host, path, data) {
         var pars = [];
@@ -1232,8 +1247,7 @@ module.exports = class huobipro extends Exchange {
         return Signature;
     }
 
-    host = "api.huobi.pro";
-    uri = "/ws/v1";
+
 
     auth() {
         // const timestamp = moment.utc().format('YYYY-MM-DDTHH:mm:ss');
@@ -1249,8 +1263,11 @@ module.exports = class huobipro extends Exchange {
             Timestamp: timestamp,
         }
 
+        var host = "api.huobi.pro";
+        var uri = "/ws/v1";
+
         //计算签名
-        data["Signature"] = this.sign_sha('GET', this.host, this.uri, data);
+        data["Signature"] = this.sign_sha('GET', host, uri, data);
         data["op"] = "auth";
         return data;
     }
@@ -1264,17 +1281,39 @@ module.exports = class huobipro extends Exchange {
         let msg = JSON.parse(text);
         let ping = this.safeValue(msg, 'ping');
         let tick = this.safeValue(msg, 'tick');
+
+        let op = this.safeValue(msg, 'op');
+
+        if(op === "auth") {
+            var err = this.safeInteger(msg, 'err-code');
+            if (err === 0) {
+                this.emit('authorized', true);
+            } else {
+                console.log('error auth:' + text);
+            }
+        }
+
+        if(op === "notify") {
+            this._websocketDispatchSecure(contextId, msg);
+        }
+
+        if(op === "ping") {
+            const sendJson = {
+                'op' : 'pong',
+                ts: msg['ts']
+            };
+            this.websocketSendJson(sendJson,contextId);
+        }
+
         if (typeof ping !== 'undefined') {
             // heartbeat ping-pong
             const sendJson = {
                 'pong': msg['ping'],
             };
-            this.websocketSendJson(sendJson);
+            this.websocketSendJson(sendJson,contextId);
         } else if (typeof tick !== 'undefined') {
-            // console.log(msg);
             this._websocketDispatch(contextId, msg);
         }
-        //  else :remove console.log(text);
     }
 
     _websocketParseTrade(trade, symbol) {
@@ -1312,8 +1351,26 @@ module.exports = class huobipro extends Exchange {
         };
     }
 
-    _websocketDispatch(contextId, data) {
+    _websocketDispatchSecure(contextId, data) {
+        const topic = this.safeString(data, 'topic');
+        const vals = topic.split('.');
+        let tp = vals[0];
 
+        if(tp === "orders") {
+            var order = data["data"];
+            order.timestamp = data.ts;
+            const symbol = this.findSymbol(order.symbol);
+            this.emit('orders', symbol, order);
+        }
+
+        if(tp === "accounts") {
+            var b = data["data"];
+            b.timestamp = data.ts;
+            this.emit('balance', b);
+        }
+    }
+
+    _websocketDispatch(contextId, data) {
         // console.log('received', data.ch, 'data.ts', data.ts, 'crawler.ts', moment().format('x'));
         const ch = this.safeString(data, 'ch');
         const vals = ch.split('.');
@@ -1322,6 +1379,7 @@ module.exports = class huobipro extends Exchange {
         // :symbol
         // const symbol = this.marketsById[rawsymbol].symbol;
         const symbol = this.findSymbol(rawsymbol);
+
 
         // let channel = data.ch.split('.')[2];
         if (channel === 'depth') {
@@ -1347,18 +1405,13 @@ module.exports = class huobipro extends Exchange {
         } else if (channel === 'detail') {
             let detail = this._websocketParseDetail(data['tick'], symbol);
             this.emit('detail', symbol, detail);
-        } else if (channel === "orders") {
-            console.log('orders');
-        } else if (channel === "auth") {
-            
-            this.safeString(data, 'err-code')
-        }
+        } 
         // TODO:kline
         // console.log('kline', data.tick);
     }
 
     _websocketSubscribe(contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade' && event !== 'detail' && event !== 'orders') {
+        if (event !== 'ob' && event !== 'trade' && event !== 'detail' && event !== 'orders' && event !== 'balance') {
             throw new NotSupported('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
         }
         let ch = undefined;
@@ -1377,16 +1430,25 @@ module.exports = class huobipro extends Exchange {
         } else if (event === 'detail') {
             ch = '.detail';
         }
-        const rawsymbol = this.marketId(symbol);
-        const sendJson = {
-            'sub': 'market.' + rawsymbol + ch,
-            'id': rawsymbol,
-        };
 
         if (event === "orders") {
-            sendJson.sub = 'orders.' + rawsymbol + '.update';
+            const sendJson = {
+                'op': 'sub',
+                'topic': 'orders.*.update'
+            };
+            this.websocketSendJson(sendJson, "secure");
+        } else if (event === "balance") {
+            const sendJson = {
+                'op': 'sub',
+                'topic': 'accounts'
+            };
             this.websocketSendJson(sendJson, "secure");
         } else {
+            const rawsymbol = this.marketId(symbol);
+            const sendJson = {
+                'sub': 'market.' + rawsymbol + ch,
+                'id': rawsymbol,
+            };
             this.websocketSendJson(sendJson);
         }
 
