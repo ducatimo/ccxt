@@ -132,6 +132,7 @@ const exchanges = {
     'hitbtc':                  require ('./js/hitbtc.js'),
     'hitbtc2':                 require ('./js/hitbtc2.js'),
     'huobipro':                require ('./js/huobipro.js'),
+    'huobikorea':              require ('./js/huobikorea.js'),
     'huobiru':                 require ('./js/huobiru.js'),
     'ice3x':                   require ('./js/ice3x.js'),
     'independentreserve':      require ('./js/independentreserve.js'),
